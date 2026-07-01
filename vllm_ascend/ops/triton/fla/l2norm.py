@@ -47,7 +47,7 @@ def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | N
     if D > BD:
         raise RuntimeError(f"l2norm_fwd: This layer doesn't support feature dim >= 64KB, got {D}.")
 
-    MBLOCK = 69
+    MBLOCK = 64
     # M, N = x.shape
     num_core = get_vectorcore_num()
     main_bs = triton.cdiv(T, num_core)
