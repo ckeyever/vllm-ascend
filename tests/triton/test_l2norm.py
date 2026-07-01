@@ -3,11 +3,11 @@ import torch_npu
 from vllm_ascend.ops.triton.fla.l2norm import l2norm_fwd as l2norm
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
-def func():
+def func(T, H):
     torch.manual_seed(42)
     init_device_properties_triton()
     device = "npu"
-    x = torch.randn(4, 128, 128, 100, dtype=torch.float16).to(device).requires_grad_(False)
+    x = torch.randn(T, H, dtype=torch.float16).to(device).requires_grad_(False)
     npu_out = l2norm(x)
     torch.npu.synchronize()
 
@@ -40,4 +40,8 @@ def func():
             prof.step()
     torch.npu.synchronize()
 
-func()
+func(16, 128)
+func(4096, 128)
+
+func(16, 110)
+func(4096, 110)
