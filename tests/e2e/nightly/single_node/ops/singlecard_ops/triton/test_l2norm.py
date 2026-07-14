@@ -17,6 +17,10 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
             (2, 500, 4, 64, torch.float),
             (2, 1000, 2, 100, torch.float),
             (3, 1024, 4, 128, torch.float),
+            (1, 8, 1, 2048, torch.float),
+            (1, 4, 1, 4096, torch.float),
+            (4, 16, 1, 8192, torch.float),
+            (1, 2, 1, 12880, torch.float),
         ]
     ],
 )
