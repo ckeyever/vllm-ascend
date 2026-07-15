@@ -97,6 +97,8 @@ def _run_case(
         block_table.stride(0),
         BLOCK_SIZE,
         slot_mapping,
+        BLOCK_SIZE,
+        1,
         TOTAL_CP_WORLD_SIZE=1,
         TOTAL_CP_RANK=0,
         CP_KV_CACHE_INTERLEAVE_SIZE=1,
