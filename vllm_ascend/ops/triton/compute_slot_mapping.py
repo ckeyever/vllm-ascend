@@ -13,14 +13,14 @@ def _compute_slot_mapping_kernel(
     block_table_ptr,  # [max_num_reqs, max_num_blocks_per_req], int32 (flat)
     block_table_stride,  # max_num_blocks_per_req
     block_size,
-    slot_mapping_ptr,  # [max_num_tokens]
-    KV_CACHE_BLOCK_SIZE: tl.constexpr = 0,
-    BLOCKS_PER_KV_BLOCK: tl.constexpr = 1,
-    TOTAL_CP_WORLD_SIZE: tl.constexpr = 1,
-    TOTAL_CP_RANK: tl.constexpr = 0,
-    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr = 1,
-    PAD_ID: tl.constexpr = -1,
-    BLOCK_SIZE: tl.constexpr = 1024,
+    slot_mapping_ptr,  # [max_num_tokens], int32
+    KV_CACHE_BLOCK_SIZE: tl.constexpr,
+    BLOCKS_PER_KV_BLOCK: tl.constexpr,
+    TOTAL_CP_WORLD_SIZE: tl.constexpr,
+    TOTAL_CP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
+    PAD_ID: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
 
@@ -38,10 +38,7 @@ def _compute_slot_mapping_kernel(
     start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
 
-    if KV_CACHE_BLOCK_SIZE == 0:
-        virtual_block_size = block_size * TOTAL_CP_WORLD_SIZE
-    else:
-        virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
+    virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
     row_offset = req_idx * block_table_stride
     for i in range(start_idx, end_idx, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
