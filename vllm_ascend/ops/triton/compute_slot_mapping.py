@@ -43,28 +43,34 @@ def _compute_slot_mapping_kernel(
     start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
 
-    virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
     row_offset = req_idx * block_table_stride
     block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
     for i in range(start_idx, end_idx, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
-        virtual_block_indices = pos // virtual_block_size
-        virtual_block_offsets = pos - virtual_block_indices * virtual_block_size
-        is_local = (
-            virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
-        ) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
-        local_block_offsets = (
-            virtual_block_offsets // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
-        ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
-            virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
-        )
+        if TOTAL_CP_WORLD_SIZE == 1:
+            block_indices = pos // block_size
+            slot_offsets = pos - block_indices * block_size
+        else:
+            virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
+            virtual_block_indices = pos // virtual_block_size
+            virtual_block_offsets = pos - virtual_block_indices * virtual_block_size
+            is_local = (
+                virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
+            ) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
+            local_block_offsets = (
+                virtual_block_offsets
+                // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
+            ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
+                virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
+            )
 
-        block_indices = (
-            virtual_block_indices * BLOCKS_PER_KV_BLOCK
-            + local_block_offsets // block_size
-        )
+            block_indices = (
+                virtual_block_indices * BLOCKS_PER_KV_BLOCK
+                + local_block_offsets // block_size
+            )
+            slot_offsets = local_block_offsets % block_size
 
         valid_block_indices = tl.where(mask, block_indices, 2147483647)
         block_idx_base = tl.min(valid_block_indices, axis=0)
@@ -74,13 +80,18 @@ def _compute_slot_mapping_kernel(
             mask=block_table_window_offsets < block_table_stride,
             other=0,
         ).to(tl.float32)
-        relative_block_indices = tl.where(
-            mask & is_local, block_indices - block_idx_base, 0
-        )
+        if TOTAL_CP_WORLD_SIZE == 1:
+            relative_block_indices = tl.where(
+                mask, block_indices - block_idx_base, 0
+            )
+        else:
+            relative_block_indices = tl.where(
+                mask & is_local, block_indices - block_idx_base, 0
+            )
         block_numbers = tl.gather(
             block_table_window, relative_block_indices, 0
         ).to(tl.int32)
-        slot_offsets = local_block_offsets % block_size
         slot_ids = block_numbers * block_size + slot_offsets
-        slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+        if TOTAL_CP_WORLD_SIZE != 1:
+            slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
