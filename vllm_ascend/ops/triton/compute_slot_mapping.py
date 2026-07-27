@@ -4,6 +4,10 @@
 from vllm.triton_utils import tl, triton
 
 
+def _next_power_of_2(value: int) -> int:
+    return 1 << (value - 1).bit_length()
+
+
 @triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
 def _compute_slot_mapping_kernel(
     num_tokens,
@@ -21,6 +25,7 @@ def _compute_slot_mapping_kernel(
     CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
     PAD_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
 
@@ -40,6 +45,7 @@ def _compute_slot_mapping_kernel(
 
     virtual_block_size = KV_CACHE_BLOCK_SIZE * TOTAL_CP_WORLD_SIZE
     row_offset = req_idx * block_table_stride
+    block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
     for i in range(start_idx, end_idx, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < end_idx
@@ -59,11 +65,21 @@ def _compute_slot_mapping_kernel(
             virtual_block_indices * BLOCKS_PER_KV_BLOCK
             + local_block_offsets // block_size
         )
-        block_numbers = tl.load(
-            block_table_ptr + row_offset + block_indices,
-            mask=mask & is_local,
+
+        valid_block_indices = tl.where(mask, block_indices, 2147483647)
+        block_idx_base = tl.min(valid_block_indices, axis=0)
+        block_table_window_offsets = block_idx_base + block_table_offsets
+        block_table_window = tl.load(
+            block_table_ptr + row_offset + block_table_window_offsets,
+            mask=block_table_window_offsets < block_table_stride,
             other=0,
-        ).to(tl.int64)
+        ).to(tl.float32)
+        relative_block_indices = tl.where(
+            mask & is_local, block_indices - block_idx_base, 0
+        )
+        block_numbers = tl.gather(
+            block_table_window, relative_block_indices, 0
+        ).to(tl.int32)
         slot_offsets = local_block_offsets % block_size
         slot_ids = block_numbers * block_size + slot_offsets
         slot_ids = tl.where(is_local, slot_ids, PAD_ID)
