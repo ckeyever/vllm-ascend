@@ -20,7 +20,7 @@ import torch
 from vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope import (
     _split_qkv_and_compute_local_qk_var_kernel,
 )
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton, get_vectorcore_num
 
 DEVICE = "npu"
 DTYPE = torch.bfloat16
@@ -124,7 +124,9 @@ def _run_case(
         device=DEVICE,
     )
 
-    _split_qkv_and_compute_local_qk_var_kernel[(num_programs,)](
+    num_vectorcore = get_vectorcore_num()
+    grid = (min(num_tokens, num_vectorcore),)
+    _split_qkv_and_compute_local_qk_var_kernel[grid](
         qkv,
         q,
         k,
@@ -199,6 +201,7 @@ def main() -> None:
     init_device_properties_triton()
     _case_single_token_non_power_of_two_columns()
     _case_grid_stride_loop_and_masked_tail()
+    print("OK...................OK")
 
 
 if __name__ == "__main__":
