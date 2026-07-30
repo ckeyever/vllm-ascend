@@ -20,6 +20,7 @@ import torch
 from vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope import (
     _apply_global_rmsnorm_kernel,
 )
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 DEVICE = "npu"
 DTYPE = torch.bfloat16
@@ -165,8 +166,9 @@ def _run_case(
     q_weight = q_weight_cpu.to(DEVICE)
     k_weight = k_weight_cpu.to(DEVICE)
     qk_global_var = qk_global_var_cpu.to(DEVICE)
+    grid = (min(num_tokens, num_vectorcore),)
 
-    _apply_global_rmsnorm_kernel[(num_programs,)](
+    _apply_global_rmsnorm_kernel[(grid,)](
         q,
         k,
         cos,
@@ -192,6 +194,7 @@ def _run_case(
     actual_k = k.view(num_tokens, k_num_heads, head_dim).cpu()
     _assert_close(case_name, "q", actual_q, expected_q)
     _assert_close(case_name, "k", actual_k, expected_k)
+    print("OK...................OK")
 
 
 def _case_single_token_full_rotary_dim() -> None:
