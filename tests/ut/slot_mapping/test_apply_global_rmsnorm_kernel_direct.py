@@ -166,6 +166,7 @@ def _run_case(
     q_weight = q_weight_cpu.to(DEVICE)
     k_weight = k_weight_cpu.to(DEVICE)
     qk_global_var = qk_global_var_cpu.to(DEVICE)
+    num_vectorcore = get_vectorcore_num()
     grid = (min(num_tokens, num_vectorcore),)
 
     _apply_global_rmsnorm_kernel[(grid,)](
