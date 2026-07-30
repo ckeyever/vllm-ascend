@@ -20,7 +20,7 @@ import torch
 from vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope import (
     _apply_global_rmsnorm_kernel,
 )
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton, get_vectorcore_num
 
 DEVICE = "npu"
 DTYPE = torch.bfloat16
@@ -229,6 +229,7 @@ def _case_multi_program_partial_rotary_dim_and_tp() -> None:
 
 
 def main() -> None:
+    init_device_properties_triton()
     _case_single_token_full_rotary_dim()
     _case_multi_program_partial_rotary_dim_and_tp()
 
