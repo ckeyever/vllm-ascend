@@ -187,11 +187,11 @@ def _case_single_token_non_power_of_two_columns() -> None:
 def _case_grid_stride_loop_and_masked_tail() -> None:
     _run_case(
         case_name="grid_stride_loop_and_masked_tail",
-        num_tokens=19,
+        num_tokens=512,
         output_capacity=24,
         num_programs=3,
-        q_cols=128,
-        k_cols=64,
+        q_cols=1536,
+        k_cols=512,
         input_padding=0,
         seed=1,
     )
