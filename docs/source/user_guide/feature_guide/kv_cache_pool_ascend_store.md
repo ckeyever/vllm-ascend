@@ -124,6 +124,9 @@ KV Cache supports the following three external storage backends, choose the stor
     | `prefer_alloc_in_same_node` | bool | true | No | true / false | Whether to prefer allocating KV on the same node. |
     | `enable_ssd_offload` | bool | false | No | true / false | Whether to enable SSD offload. Environment variables are not supported. |
     | `ssd_offload_path` | str | No default | Required when SSD offload enabled | Absolute path | Absolute path for SSD offload data storage (for example, /nvme/mooncake_offload). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symlinks, and paths containing `..` are rejected. |
+    | `enable_ssd_prefetch` | bool | false | No | true / false | Enable SSD-to-DRAM prefetch on exist queries. Requires SSD offload and a Mooncake build with `ExistOptions` support; see [SSD Prefetch Configuration](#ssd-prefetch-configuration). |
+    | `ssd_prefetch_cooldown_sec` | int | Mooncake default | No | Seconds | Memory-pressure backoff for SSD prefetch. Omitted or null values are not passed to Mooncake. |
+    | `ssd_prefetch_dedup_ttl_sec` | int | Mooncake default | No | Seconds | Per-key deduplication TTL for SSD prefetch. Omitted or null values are not passed to Mooncake. |
     | `tenant_id` | str | default | No | String | Mooncake tenant namespace. Missing, `null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. |
 
     </details>
@@ -449,6 +452,14 @@ The `kv_connector_extra_config` fields used in the scripts above are documented 
 
 In Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When vLLM starts, `AscendStoreConnector`/`MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json`, with no separate `mooncake_client` process required.
 
+Only worker clients own local SSD storage. Each worker uses a subdirectory named `rank_<global_rank>/` under `ssd_offload_path`; the global rank includes the DP offset as well as TP/PP/CP ranks. Scheduler clients do not enable local SSD offload, but can still query SSD-backed keys and trigger remote prefetch when configured.
+
+In a single-node DP=2 deployment, both DP replicas can use the same `mooncake.json`: their workers use distinct rank subdirectories and their schedulers do not claim the shared root directory. Separate vLLM service instances must use different `ssd_offload_path` roots if their global ranks overlap.
+
+The error `storage_path already held by another live client` is emitted by Mooncake's client-side bucket backend when it cannot acquire the local directory lock. Check the Mooncake package and native libraries loaded by the vLLM process, and any other live clients using that directory. The `mooncake_master` version alone does not identify the client's locking implementation. See the [Mooncake SSD ownership contract](https://kvcache-ai.github.io/Mooncake/design/store/ssd-offload.html#bucketstoragebackend-default).
+
+Each worker rank uses an independent SSD subdirectory under `ssd_offload_path`, while all ranks on the same node share the physical disk. Set an explicit per-rank quota.
+
 SSD disk usage control environment variables:
 
 ```shell
@@ -474,6 +485,24 @@ Note: `--max-num-batched-tokens` only chunks prefill compute; it does not reduce
 | `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | int (bytes) | 2199023255552 (2 TB) | Strongly recommended to set explicitly | Must match actual disk capacity | Per-rank maximum disk usage reported to Mooncake master, aggregated by master across clients (roughly 2 TB x rank count). Default far exceeds real disk capacity; must be overridden. |
 
 </details>
+
+##### SSD Prefetch Configuration
+
+SSD offload and SSD prefetch are configured separately. After `enable_ssd_offload` is enabled as above, add the following fields to the same `mooncake.json` if you also want SSD-to-DRAM prefetch:
+
+```json
+{
+    "enable_ssd_prefetch": true,
+    "ssd_prefetch_cooldown_sec": 5,
+    "ssd_prefetch_dedup_ttl_sec": 30
+}
+```
+
+| Field | Description |
+| :--- | :--- |
+| `enable_ssd_prefetch` | Optional. Set to `true` to enable SSD-to-DRAM prefetch on exist queries. When enabled, `batch_is_exist` passes `ExistOptions(prefetch_to_memory=True)` so that Mooncake promotes SSD-only objects back into DRAM proactively during cache probe. This hides SSD read latency behind ongoing compute thanks to vLLM's asynchronous scheduling. **Requires `enable_ssd_offload` to be `true` and a Mooncake version that implements [RFC #2213](https://github.com/kvcache-ai/Mooncake/issues/2213) (post-v0.3.11).** If the installed Mooncake does not support `ExistOptions`, a warning is logged and the option is silently ignored. Default: `false`. |
+| `ssd_prefetch_cooldown_sec` | Optional. Memory-pressure backoff for SSD prefetch, in seconds. When a promotion fails because DRAM is saturated (`NO_AVAILABLE_HANDLE`), prefetch is suppressed for this many seconds so that eviction/offload can reclaim DRAM instead of competing with promotion. Prevents the "prefetch keeps trying to add to a full DRAM while offload can't drain it" thrash that pins memory and spins eviction. Set `0` to disable the backoff. Tune it to roughly the time it takes eviction/offload to drain DRAM from the high watermark back down (observe `[EVICT-TRIGGER] memory_ratio=...` in the master log). Only relevant when `enable_ssd_prefetch` is `true`. vLLM-Ascend does not impose its own default: if this field is omitted from `mooncake.json`, it is not passed to `setup()` and Mooncake's built-in default (currently `5`) applies. |
+| `ssd_prefetch_dedup_ttl_sec` | Optional. Per-key de-duplication / rate-limit TTL for SSD prefetch, in seconds. The same key is prefetched at most once per this period, suppressing duplicate triggers from concurrent exist/get probes across TP ranks (and, for cross-node prefetch, repeated delegations to the same holder). Cuts the RPC/thread storm that can starve offload. Set `0` to disable rate-limiting. Only relevant when `enable_ssd_prefetch` is `true`. vLLM-Ascend does not impose its own default: if this field is omitted from `mooncake.json`, it is not passed to `setup()` and Mooncake's built-in default (currently `30`) applies. |
 
 ### Verification
 
