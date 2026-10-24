@@ -10,7 +10,7 @@ from dataclasses import replace
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1, KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
 )
@@ -326,6 +326,29 @@ class AscendOffloadingConnector(OffloadingConnector):
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
     ) -> None:
+        transfer = getattr(vllm_config, "kv_transfer_config", None)
+        shared = transfer is not None and transfer.kv_connector_extra_config.get("cross_dp_shared_cache", False)
+        if shared:
+            from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import build_offloading_config
+            from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+            from .shared.scheduler import SharedOffloadingScheduler
+
+            KVConnectorBase_V1.__init__(self, vllm_config, role, kv_cache_config)
+            config = build_offloading_config(vllm_config, kv_cache_config)
+            self._canonical_layout = config.canonical_layout
+            spec = OffloadingSpecFactory.create_spec(config)
+            self.connector_scheduler = (
+                SharedOffloadingScheduler(spec, vllm_config, kv_cache_config)
+                if role == KVConnectorRole.SCHEDULER
+                else None
+            )
+            self.connector_worker = (
+                AscendOffloadingConnectorWorker(spec, vllm_config, kv_cache_config)
+                if role == KVConnectorRole.WORKER
+                else None
+            )
+            return
         super().__init__(vllm_config, role, kv_cache_config)
         connector_worker = self.connector_worker
         if connector_worker is not None:

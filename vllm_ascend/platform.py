@@ -537,6 +537,11 @@ class NPUPlatform(Platform):
                     if ratios:
                         config.compress_ratios = list(ratios)
 
+        from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.shared.bootstrap import (
+            validate_shared_config,
+        )
+
+        validate_shared_config(vllm_config)
         _validate_model_runner_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 

@@ -1678,3 +1678,18 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: platform/patch_shared_kv_offload.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.utils.CoreEngineProcManager`
+#    Why:
+#       Native offloading has no parent-owned connector service lifecycle hook.
+#       A cross-DP CPU/SSD pool must outlive engine startup and stop after DMA.
+#    How:
+#       For cross_dp_shared_cache only, start one local service before DP spawn,
+#       copy its connection into child configuration, and include it in process
+#       liveness monitoring and engine-manager shutdown/finalization.
+#    Related PR (if no, explain why):
+#       No upstream PR has been opened for this Ascend implementation.
+#    Future Plan:
+#       Remove the patch when vLLM exposes a parent-owned connector service hook.

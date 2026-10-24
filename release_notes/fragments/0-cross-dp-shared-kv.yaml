@@ -1,0 +1,5 @@
+# Development fragment: replace 0 with the assigned PR number before submission.
+pr: 0
+entries:
+  - category: feature
+    text: Added opt-in Native CPU and filesystem SSD KV-cache sharing across local multiprocessing DP replicas, with duplicate-save suppression and cross-DP restores.

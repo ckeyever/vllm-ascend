@@ -137,3 +137,94 @@ llm = LLM(
 - `CPUOffloadingSpec` uses pinned (page-locked) tensors when available. `TieringOffloadingSpec` must use vLLM's shared mmap primary tier; CANN does not provide a memory-copy-compatible equivalent of CUDA's arbitrary mmap host registration, so its NPU↔CPU bandwidth must be benchmarked separately on the target host and CANN version.
 - The `gpu_memory_utilization` parameter controls how much NPU memory is reserved for KV cache. Lower values leave less NPU memory for KV cache, making offloading more active.
 - For production workloads, benchmark with realistic request patterns to find the optimal `cpu_bytes_to_use` and `blocks_per_chunk` settings.
+
+## Share CPU and SSD KV cache across local DP replicas
+
+Set `cross_dp_shared_cache` to `true` to give all DP replicas in one local
+multiprocessing service a common CPU pool, cache index, and optional filesystem
+SSD tier. The service parent owns one cache coordinator for the entire engine
+process lifetime. Each DP retains its own NPU KV cache.
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+    --data-parallel-size 2 \
+    --data-parallel-backend mp \
+    --distributed-executor-backend mp \
+    --kv-transfer-config '{
+        "kv_connector": "OffloadingConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {
+            "spec_name": "TieringOffloadingSpec",
+            "cross_dp_shared_cache": true,
+            "cpu_bytes_to_use": 8589934592,
+            "blocks_per_chunk": 8,
+            "secondary_tiers": [{
+                "type": "fs",
+                "root_dir": "/mnt/nvme/vllm-kv",
+                "max_bytes_to_use": 107374182400
+            }]
+        }
+    }'
+```
+
+For shared CPU-only offload, use `CPUOffloadingSpec` and omit `secondary_tiers`.
+The feature defaults to `false`.
+
+### Shared-cache behavior
+
+- A save checks the shared CPU and SSD indexes atomically. If a complete copy
+  already exists, or another DP is filling that key, it skips duplicate D2H.
+  A CPU-resident chunk is written to SSD at most once while that SSD entry exists.
+- Concurrent saves of a new key elect one writer DP. Its required TP/PP workers
+  must all complete before any DP can read the chunk.
+- A CPU hit from another DP loads directly from the shared CPU slot into the
+  requesting DP's NPU cache. Concurrent SSD hits share one SSD-to-CPU promotion.
+- Lookup tickets protect a reported hit until it becomes a DMA read lease or
+  the scheduling scope ends. Active DMA and SSD I/O protect their slots from
+  eviction. Aborted writes quarantine their physical slots until service exit.
+- A query miss can become a save hit if another DP saves the prefix while the
+  first DP computes it. The save rechecks both tiers and skips that duplicate.
+- Offload is a copy. NPU blocks continue to follow the normal request and prefix
+  cache lifetime after a CPU copy completes.
+
+### Capacity and supported configurations
+
+`cpu_bytes_to_use` is the **total shared CPU budget for the service instance**,
+including all logical TP/PP slices; it is not allocated again for every DP.
+`max_bytes_to_use` is the shared SSD KV payload quota, including row padding and
+pending writes. Manifests and filesystem metadata require additional disk space;
+omitting the quota or setting it to `0` leaves the SSD tier unbounded. Both tiers use
+LRU eviction of idle entries. Shared-memory capacity must be available in
+`/dev/shm` before the pool can start.
+
+The implementation supports one parent-managed, single-node mp DP deployment
+with the same model and TP/PP/KV layout across DP replicas. Single-worker local
+`uni` executors are accepted. Ordinary attention K/V and MLA cache bytes use the
+existing Native Ascend layout adapter. Cross-DP deduplication retains each logical
+TP worker's page; it does not enable the separate MLA replicated-TP layout.
+
+Only built-in LRU, `canonical_layout=false`, and at most one built-in `fs`
+secondary tier are supported; custom policy and tier modules are rejected. Context parallelism, elastic DP, Ray, external/hybrid DP load balancing,
+and independently launched rank processes are rejected. The shared mode does not
+add support for previously unsupported cache layouts or model features.
+
+Prefix hash seeds must match. The default SHA-256 configuration is shareable.
+When using `xxhash` or `xxhash_cbor`, set the existing `PYTHONHASHSEED` consistently
+before starting the service; a random per-process seed is rejected.
+
+The shared CPU pool uses mmap for both specs. Its H2D/D2H bandwidth can differ
+from the CPU-only private pinned-tensor path, so benchmark on the target host and
+CANN version. SSD data is scoped to this running service and removed at shutdown;
+cache reuse across restarts is not provided. Model weights must remain fixed for
+the service lifetime; restart the service to change the shared weight version.
+Coordinator failure stops its owning
+engine group. Explicit external-cache reset requires all DP transfers and lookup
+scopes to be idle; resetting only NPU prefix caches retains the shared cache.
+
+### Monitoring
+
+Instance-wide counters and gauges use the `vllm:kv_offload_shared_` prefix.
+They include `dram_hits`, `dram_stores`, `deduplicated_stores`, `ssd_stores`,
+`ssd_promotions`, tier evictions, I/O errors, live read tickets, pending I/O, and
+quarantined slots. DP0 reports the physical pool metrics and cache events once to
+avoid counting the same shared capacity once per DP.

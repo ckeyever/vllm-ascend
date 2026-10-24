@@ -23,6 +23,41 @@ class _NPUWorkerMixin:
 
     _worker: NPUOffloadingWorker | None
 
+    def __init__(self, config):
+        super().__init__(config)
+        if self.extra_config.get("cross_dp_shared_cache", False):
+            if "_cross_dp_connection" not in self.extra_config:
+                raise ValueError("Shared KV offload must be started by the local mp service parent")
+            # Cross-DP ownership replaces the upstream replicated rank-0 writer.
+            self.replicated_layout = False
+
+    @classmethod
+    def build_metric_definitions(cls, extra_config):
+        if extra_config.get("cross_dp_shared_cache", False):
+            from .shared.manager import metric_definitions
+
+            return metric_definitions()
+        return super().build_metric_definitions(extra_config)
+
+    @classmethod
+    def config_info_keys(cls, extra_config):
+        if extra_config.get("cross_dp_shared_cache", False):
+            return ("cpu_num_chunks",)
+        return super().config_info_keys(extra_config)
+
+    def get_manager(self):
+        if not self.extra_config.get("cross_dp_shared_cache", False):
+            return super().get_manager()
+        if self._manager is None:
+            from .shared.manager import SharedOffloadingManager
+
+            self._manager = SharedOffloadingManager(
+                self.extra_config["_cross_dp_connection"],
+                self.config.parallel.data_parallel_index,
+                self.extra_config["_cross_dp_identity"]["hash_seed"],
+            )
+        return self._manager
+
     def create_worker(
         self,
         kv_caches: CanonicalKVCaches,
@@ -34,7 +69,12 @@ class _NPUWorkerMixin:
         kv_caches: CanonicalKVCaches,
     ) -> OffloadingWorker:
         if self._worker is None:
-            self._worker = self.create_worker(kv_caches)
+            if self.extra_config.get("cross_dp_shared_cache", False):
+                from .shared.worker import SharedNPUOffloadingWorker
+
+                self._worker = SharedNPUOffloadingWorker(self.config, kv_caches, self.blocks_per_chunk)
+            else:
+                self._worker = self.create_worker(kv_caches)
         return self._worker
 
 
